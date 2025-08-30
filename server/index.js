@@ -8,6 +8,8 @@ const GAME_HEIGHT = 2000;
 const FOOD_COUNT = 500;
 const MIN_MASS = 10;
 const MAX_MASS = 300;
+const SPLIT_MIN_MASS = 20; // Lower threshold for testing
+const EJECT_MIN_MASS = 15; // Lower threshold for testing
 
 let players = {};
 let food = {};
@@ -44,7 +46,7 @@ function getDistance(a, b) {
 
 wss.on('connection', (ws) => {
   const id = Math.random().toString(36).substr(2, 9);
-  const startMass = MIN_MASS;
+  const startMass = 25; // Increased for easier testing
   players[id] = { 
     cells: [{
       x: Math.random() * (GAME_WIDTH - 200) + 100,
@@ -98,12 +100,76 @@ wss.on('connection', (ws) => {
         });
       }
       if (data.type === 'split' && players[id]) {
-        // Split cell logic - for now just log
-        console.log(`Player ${id} wants to split`);
+        // Split cell logic
+        const player = players[id];
+        const newCells = [];
+        
+        player.cells.forEach(cell => {
+          if (cell.mass > SPLIT_MIN_MASS && player.cells.length < 16) { // Can split if mass > 20 and < 16 cells
+            const halfMass = cell.mass / 2;
+            const newRadius = massToRadius(halfMass);
+            
+            // Original cell keeps half mass
+            cell.mass = halfMass;
+            cell.r = newRadius;
+            
+            // Create new cell
+            const angle = Math.random() * 2 * Math.PI;
+            const distance = newRadius * 2.5;
+            const newCell = {
+              x: cell.x + Math.cos(angle) * distance,
+              y: cell.y + Math.sin(angle) * distance,
+              mass: halfMass,
+              r: newRadius,
+              color: cell.color,
+              splitTime: Date.now() // Track when cell was created for merging
+            };
+            
+            // Keep within boundaries
+            newCell.x = Math.max(newCell.r, Math.min(GAME_WIDTH - newCell.r, newCell.x));
+            newCell.y = Math.max(newCell.r, Math.min(GAME_HEIGHT - newCell.r, newCell.y));
+            
+            newCells.push(newCell);
+          }
+        });
+        
+        // Add new cells to player
+        player.cells.push(...newCells);
+        
+        // Update score
+        player.score = player.cells.reduce((total, c) => total + c.mass, 0);
       }
       if (data.type === 'eject' && players[id]) {
-        // Eject mass logic - for now just log
-        console.log(`Player ${id} wants to eject mass`);
+        // Eject mass logic
+        const player = players[id];
+        
+        player.cells.forEach(cell => {
+          if (cell.mass > EJECT_MIN_MASS) { // Can only eject if cell has enough mass
+            const ejectMass = 16;
+            cell.mass -= ejectMass;
+            cell.r = massToRadius(cell.mass);
+            
+            // Create ejected mass as food
+            const angle = Math.random() * 2 * Math.PI;
+            const distance = cell.r + 20;
+            const ejectId = Math.random().toString(36).substr(2, 9);
+            
+            food[ejectId] = {
+              x: cell.x + Math.cos(angle) * distance,
+              y: cell.y + Math.sin(angle) * distance,
+              r: massToRadius(ejectMass),
+              color: '#ffff00', // Yellow for ejected mass
+              mass: ejectMass
+            };
+            
+            // Keep within boundaries  
+            food[ejectId].x = Math.max(food[ejectId].r, Math.min(GAME_WIDTH - food[ejectId].r, food[ejectId].x));
+            food[ejectId].y = Math.max(food[ejectId].r, Math.min(GAME_HEIGHT - food[ejectId].r, food[ejectId].y));
+          }
+        });
+        
+        // Update score
+        player.score = player.cells.reduce((total, c) => total + c.mass, 0);
       }
     } catch {}
   });
@@ -129,18 +195,101 @@ function gameLoop() {
         
         if (distance < cell.r + foodItem.r) {
           // Consume food
-          cell.mass += 1;
+          cell.mass += foodItem.mass || 1;
           cell.r = massToRadius(cell.mass);
           delete food[foodId];
           
-          // Generate new food to replace consumed food
-          generateFood();
+          // Generate new food to replace consumed food (but not ejected mass)
+          if (!foodItem.mass || foodItem.mass === 1) {
+            generateFood();
+          }
           
           // Update player score
           player.score = player.cells.reduce((total, c) => total + c.mass, 0);
         }
       });
     });
+  });
+  
+  // Check collisions between player cells (absorption)
+  Object.keys(players).forEach(playerId => {
+    const player = players[playerId];
+    
+    Object.keys(players).forEach(otherId => {
+      if (playerId === otherId) return;
+      const otherPlayer = players[otherId];
+      
+      player.cells.forEach((cell, cellIndex) => {
+        otherPlayer.cells.forEach((otherCell, otherIndex) => {
+          const distance = getDistance(cell, otherCell);
+          
+          // Can absorb if cell is 10% bigger and touching
+          if (cell.mass > otherCell.mass * 1.1 && distance < cell.r - otherCell.r + 5) {
+            // Absorb the smaller cell
+            cell.mass += otherCell.mass;
+            cell.r = massToRadius(cell.mass);
+            
+            // Remove absorbed cell
+            otherPlayer.cells.splice(otherIndex, 1);
+            
+            // Update scores
+            player.score = player.cells.reduce((total, c) => total + c.mass, 0);
+            otherPlayer.score = otherPlayer.cells.reduce((total, c) => total + c.mass, 0);
+            
+            // If player has no cells left, remove them
+            if (otherPlayer.cells.length === 0) {
+              delete players[otherId];
+            }
+          }
+        });
+      });
+    });
+  });
+  
+  // Handle cell merging after split time
+  Object.keys(players).forEach(playerId => {
+    const player = players[playerId];
+    const now = Date.now();
+    
+    // Merge cells that can merge (after 30 seconds)
+    for (let i = 0; i < player.cells.length; i++) {
+      for (let j = i + 1; j < player.cells.length; j++) {
+        const cell1 = player.cells[i];
+        const cell2 = player.cells[j];
+        
+        // Can merge if both cells are old enough (30 seconds) and touching
+        const cell1CanMerge = !cell1.splitTime || (now - cell1.splitTime > 30000);
+        const cell2CanMerge = !cell2.splitTime || (now - cell2.splitTime > 30000);
+        
+        if (cell1CanMerge && cell2CanMerge) {
+          const distance = getDistance(cell1, cell2);
+          if (distance < cell1.r + cell2.r) {
+            // Merge cells
+            cell1.mass += cell2.mass;
+            cell1.r = massToRadius(cell1.mass);
+            delete cell1.splitTime; // Reset split timer
+            
+            // Remove second cell
+            player.cells.splice(j, 1);
+            j--; // Adjust index since we removed an element
+            
+            // Update score
+            player.score = player.cells.reduce((total, c) => total + c.mass, 0);
+          }
+        }
+      }
+    }
+    
+    // Mass decay over time (very slow)
+    player.cells.forEach(cell => {
+      if (cell.mass > MIN_MASS) {
+        cell.mass *= 0.9995; // Very slow decay
+        cell.r = massToRadius(cell.mass);
+      }
+    });
+    
+    // Update score after decay
+    player.score = player.cells.reduce((total, c) => total + c.mass, 0);
   });
   
   // Broadcast game state to all clients

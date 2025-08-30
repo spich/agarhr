@@ -211,24 +211,31 @@ function App() {
   useEffect(() => {
     function onKeyDown(e) {
       const key = e.key.toLowerCase();
-      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
-        e.preventDefault();
-        setKeys(prev => ({ ...prev, [key]: true }));
-      }
+      
       // Handle split (Space key)
       if (e.code === 'Space') {
         e.preventDefault();
         wsRef.current?.send(JSON.stringify({ type: "split" }));
+        return;
       }
-      // Handle mass ejection (W key)
-      if (key === 'w' && !keys['w']) {
+      
+      // Handle mass ejection (W key) - separate from movement
+      if (key === 'w' && e.ctrlKey === false && e.altKey === false) {
+        e.preventDefault();
         wsRef.current?.send(JSON.stringify({ type: "eject" }));
+        return;
+      }
+      
+      // Handle movement keys
+      if (['a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+        e.preventDefault();
+        setKeys(prev => ({ ...prev, [key]: true }));
       }
     }
     
     function onKeyUp(e) {
       const key = e.key.toLowerCase();
-      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+      if (['a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
         e.preventDefault();
         setKeys(prev => ({ ...prev, [key]: false }));
       }
