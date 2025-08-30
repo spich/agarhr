@@ -80,6 +80,44 @@ function Chat({ wsRef, messages, onSendMessage }) {
   );
 }
 
+function Leaderboard({ players, me }) {
+  const sortedPlayers = Object.entries(players)
+    .sort(([, a], [, b]) => b.mass - a.mass)
+    .slice(0, 10);
+
+  return (
+    <div style={{
+      position: "absolute",
+      top: "20px",
+      right: "20px",
+      width: "200px",
+      background: "rgba(255, 255, 255, 0.9)",
+      border: "2px solid #333",
+      borderRadius: "5px",
+      padding: "10px",
+      fontSize: "12px",
+      fontFamily: "Arial, sans-serif"
+    }}>
+      <h3 style={{ margin: "0 0 10px 0", textAlign: "center", fontSize: "14px" }}>
+        Leaderboard
+      </h3>
+      {sortedPlayers.map(([id, player], index) => (
+        <div key={id} style={{
+          padding: "2px 5px",
+          backgroundColor: id === me ? "#FFD700" : "transparent",
+          borderRadius: "3px",
+          marginBottom: "2px",
+          display: "flex",
+          justifyContent: "space-between"
+        }}>
+          <span>{index + 1}. {player.name || id.substr(0, 8)}</span>
+          <span>{Math.round(player.mass)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function MiniMap({ players, me }) {
   const mapWidth = 150;
   const mapHeight = 113; // Maintain 800:600 aspect ratio
@@ -127,14 +165,27 @@ function App() {
   const [mousePos, setMousePos] = useState({ x: 400, y: 300 });
   const [chatMessages, setChatMessages] = useState([]);
   const [camera, setCamera] = useState({ x: 0, y: 0, scale: 1 });
+  const [gameStarted, setGameStarted] = useState(false);
+  const [playerName, setPlayerName] = useState('');
 
   useEffect(() => {
+    if (!gameStarted) return;
+    
     const ws = new WebSocket("ws://localhost:8080");
     wsRef.current = ws;
 
     ws.onmessage = (msg) => {
       const data = JSON.parse(msg.data);
-      if (data.type === "welcome") setMe(data.id);
+      if (data.type === "welcome") {
+        setMe(data.id);
+        // Send player name
+        if (playerName) {
+          ws.send(JSON.stringify({
+            type: "setName",
+            name: playerName
+          }));
+        }
+      }
       if (data.type === "state") {
         setPlayers(data.players);
         if (data.food) setFood(data.food);
@@ -151,7 +202,7 @@ function App() {
     };
 
     return () => ws.close();
-  }, []);
+  }, [gameStarted, playerName]);
 
   // Handle mouse movement
   useEffect(() => {
@@ -170,9 +221,27 @@ function App() {
   useEffect(() => {
     function onKeyDown(e) {
       const key = e.key.toLowerCase();
-      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+      
+      // Handle split (Space)
+      if (e.code === 'Space') {
+        e.preventDefault();
+        handleSplit();
+        return;
+      }
+      
+      // Handle movement keys
+      if (['a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
         e.preventDefault();
         setKeys(prev => ({ ...prev, [key]: true }));
+      }
+      
+      // Handle W key - both movement and ejecting
+      if (key === 'w') {
+        e.preventDefault();
+        // First set movement
+        setKeys(prev => ({ ...prev, [key]: true }));
+        // Also eject mass
+        handleEjectMass();
       }
     }
     
@@ -263,6 +332,40 @@ function App() {
       type: "chat",
       message: message
     }));
+  };
+
+  const handleSplit = () => {
+    if (!wsRef.current || !me || !players[me]) return;
+    
+    // Calculate world mouse position
+    const canvasRect = canvasRef.current?.getBoundingClientRect();
+    if (canvasRect) {
+      const worldMouseX = (mousePos.x - 400) / camera.scale + camera.x;
+      const worldMouseY = (mousePos.y - 300) / camera.scale + camera.y;
+      
+      wsRef.current.send(JSON.stringify({
+        type: "split",
+        mouseX: worldMouseX,
+        mouseY: worldMouseY
+      }));
+    }
+  };
+
+  const handleEjectMass = () => {
+    if (!wsRef.current || !me || !players[me]) return;
+    
+    // Calculate world mouse position
+    const canvasRect = canvasRef.current?.getBoundingClientRect();
+    if (canvasRect) {
+      const worldMouseX = (mousePos.x - 400) / camera.scale + camera.x;
+      const worldMouseY = (mousePos.y - 300) / camera.scale + camera.y;
+      
+      wsRef.current.send(JSON.stringify({
+        type: "eject",
+        mouseX: worldMouseX,
+        mouseY: worldMouseY
+      }));
+    }
   };
 
   // Draw all game elements
@@ -388,11 +491,30 @@ function App() {
         style={{ background: "#fafafa", display: "block", margin: "0 auto" }}
       />
       <MiniMap players={players} me={me} />
+      <Leaderboard players={players} me={me} />
       <Chat 
         wsRef={wsRef} 
         messages={chatMessages}
         onSendMessage={handleSendMessage}
       />
+      
+      {/* Instructions */}
+      <div style={{
+        position: "absolute",
+        bottom: "20px",
+        right: "20px",
+        background: "rgba(255, 255, 255, 0.8)",
+        padding: "10px",
+        borderRadius: "5px",
+        fontSize: "11px",
+        fontFamily: "Arial, sans-serif"
+      }}>
+        <div><strong>Controls:</strong></div>
+        <div>Mouse: Move</div>
+        <div>SPACE: Split</div>
+        <div>W: Eject mass</div>
+        <div>WASD/Arrows: Move</div>
+      </div>
     </div>
   );
 }
