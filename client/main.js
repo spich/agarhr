@@ -119,11 +119,14 @@ function MiniMap({ players, me }) {
 function App() {
   const canvasRef = useRef(null);
   const [players, setPlayers] = useState({});
+  const [food, setFood] = useState({});
+  const [viruses, setViruses] = useState({});
   const [me, setMe] = useState(null);
   const wsRef = useRef(null);
   const [keys, setKeys] = useState({});
   const [mousePos, setMousePos] = useState({ x: 400, y: 300 });
   const [chatMessages, setChatMessages] = useState([]);
+  const [camera, setCamera] = useState({ x: 0, y: 0, scale: 1 });
 
   useEffect(() => {
     const ws = new WebSocket("ws://localhost:8080");
@@ -132,7 +135,11 @@ function App() {
     ws.onmessage = (msg) => {
       const data = JSON.parse(msg.data);
       if (data.type === "welcome") setMe(data.id);
-      if (data.type === "state") setPlayers(data.players);
+      if (data.type === "state") {
+        setPlayers(data.players);
+        if (data.food) setFood(data.food);
+        if (data.viruses) setViruses(data.viruses);
+      }
       if (data.type === "chat") {
         setChatMessages(prev => [...prev.slice(-19), {
           id: data.id,
@@ -185,7 +192,7 @@ function App() {
     };
   }, []);
 
-  // Handle player movement
+  // Handle player movement and camera
   useEffect(() => {
     if (!me || !players[me]) return;
 
@@ -194,27 +201,35 @@ function App() {
       let targetX = player.x;
       let targetY = player.y;
 
+      // Calculate speed based on mass (larger = slower)
+      const baseSpeed = Math.max(1, 10 - Math.sqrt(player.mass) / 10);
+      
       // Keyboard movement (WASD and arrow keys)
-      const speed = 3;
-      if (keys['w'] || keys['arrowup']) targetY -= speed;
-      if (keys['s'] || keys['arrowdown']) targetY += speed;
-      if (keys['a'] || keys['arrowleft']) targetX -= speed;
-      if (keys['d'] || keys['arrowright']) targetX += speed;
+      if (keys['w'] || keys['arrowup']) targetY -= baseSpeed;
+      if (keys['s'] || keys['arrowdown']) targetY += baseSpeed;
+      if (keys['a'] || keys['arrowleft']) targetX -= baseSpeed;
+      if (keys['d'] || keys['arrowright']) targetX += baseSpeed;
 
       // Mouse movement (towards cursor)
-      const dx = mousePos.x - player.x;
-      const dy = mousePos.y - player.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      
-      if (distance > 5) { // Only move if cursor is far enough
-        const moveSpeed = Math.min(2, distance * 0.1);
-        targetX += (dx / distance) * moveSpeed;
-        targetY += (dy / distance) * moveSpeed;
+      const canvasRect = canvasRef.current?.getBoundingClientRect();
+      if (canvasRect) {
+        const worldMouseX = (mousePos.x - 400) / camera.scale + camera.x + 400;
+        const worldMouseY = (mousePos.y - 300) / camera.scale + camera.y + 300;
+        
+        const dx = worldMouseX - player.x;
+        const dy = worldMouseY - player.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance > 5) {
+          const moveSpeed = Math.min(baseSpeed, distance * 0.1);
+          targetX += (dx / distance) * moveSpeed;
+          targetY += (dy / distance) * moveSpeed;
+        }
       }
 
-      // Boundary constraints
-      targetX = Math.max(25, Math.min(775, targetX));
-      targetY = Math.max(25, Math.min(575, targetY));
+      // Boundary constraints for game world
+      targetX = Math.max(25, Math.min(2000 - 25, targetX));
+      targetY = Math.max(25, Math.min(1500 - 25, targetY));
 
       // Send movement if position changed
       if (Math.abs(targetX - player.x) > 0.1 || Math.abs(targetY - player.y) > 0.1) {
@@ -227,7 +242,21 @@ function App() {
     }, 16); // ~60fps
 
     return () => clearInterval(interval);
-  }, [me, players, keys, mousePos]);
+  }, [me, players, keys, mousePos, camera]);
+
+  // Update camera to follow player
+  useEffect(() => {
+    if (!me || !players[me]) return;
+    
+    const player = players[me];
+    const scale = Math.max(0.3, Math.min(1, 100 / player.r));
+    
+    setCamera({
+      x: player.x,
+      y: player.y,
+      scale: scale
+    });
+  }, [me, players]);
 
   const handleSendMessage = (message) => {
     wsRef.current?.send(JSON.stringify({
@@ -236,25 +265,119 @@ function App() {
     }));
   };
 
-  // Draw all players
+  // Draw all game elements
   useEffect(() => {
     const ctx = canvasRef.current?.getContext("2d");
     if (!ctx) return;
+    
+    // Clear canvas
     ctx.clearRect(0, 0, 800, 600);
-    Object.entries(players).forEach(([id, p]) => {
+    
+    // Apply camera transformation
+    ctx.save();
+    ctx.scale(camera.scale, camera.scale);
+    ctx.translate(400 / camera.scale - camera.x, 300 / camera.scale - camera.y);
+    
+    // Draw grid (optional background)
+    ctx.strokeStyle = '#E0E0E0';
+    ctx.lineWidth = 1;
+    const gridSize = 50;
+    const startX = Math.floor((camera.x - 400 / camera.scale) / gridSize) * gridSize;
+    const endX = startX + (800 / camera.scale) + gridSize;
+    const startY = Math.floor((camera.y - 300 / camera.scale) / gridSize) * gridSize;
+    const endY = startY + (600 / camera.scale) + gridSize;
+    
+    for (let x = startX; x < endX; x += gridSize) {
       ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, 2 * Math.PI);
-      ctx.fillStyle = p.color;
-      ctx.globalAlpha = id === me ? 1 : 0.5;
+      ctx.moveTo(x, startY);
+      ctx.lineTo(x, endY);
+      ctx.stroke();
+    }
+    for (let y = startY; y < endY; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(startX, y);
+      ctx.lineTo(endX, y);
+      ctx.stroke();
+    }
+    
+    // Draw food
+    Object.values(food).forEach(foodItem => {
+      ctx.beginPath();
+      ctx.arc(foodItem.x, foodItem.y, foodItem.r, 0, 2 * Math.PI);
+      ctx.fillStyle = foodItem.color;
       ctx.fill();
-      ctx.globalAlpha = 1;
-      if (id === me) {
-        ctx.strokeStyle = "#000";
-        ctx.lineWidth = 3;
+    });
+    
+    // Draw viruses
+    Object.values(viruses).forEach(virus => {
+      ctx.beginPath();
+      ctx.arc(virus.x, virus.y, virus.r, 0, 2 * Math.PI);
+      ctx.fillStyle = virus.color;
+      ctx.fill();
+      
+      // Add spikes to viruses
+      ctx.strokeStyle = virus.color;
+      ctx.lineWidth = 3;
+      for (let i = 0; i < 12; i++) {
+        const angle = (i / 12) * 2 * Math.PI;
+        const x1 = virus.x + Math.cos(angle) * virus.r;
+        const y1 = virus.y + Math.sin(angle) * virus.r;
+        const x2 = virus.x + Math.cos(angle) * (virus.r + 10);
+        const y2 = virus.y + Math.sin(angle) * (virus.r + 10);
+        
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
         ctx.stroke();
       }
     });
-  }, [players, me]);
+    
+    // Draw players
+    Object.entries(players).forEach(([id, p]) => {
+      if (p.cells) {
+        p.cells.forEach(cell => {
+          // Draw cell
+          ctx.beginPath();
+          ctx.arc(cell.x, cell.y, cell.r, 0, 2 * Math.PI);
+          ctx.fillStyle = p.color;
+          ctx.globalAlpha = id === me ? 1 : 0.8;
+          ctx.fill();
+          
+          // Draw border for own cells
+          if (id === me) {
+            ctx.strokeStyle = "#000";
+            ctx.lineWidth = 3;
+            ctx.globalAlpha = 1;
+            ctx.stroke();
+          }
+          
+          // Draw player name
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = "#000";
+          ctx.font = `${Math.max(12, cell.r * 0.5)}px Arial`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(p.name || id, cell.x, cell.y);
+        });
+      } else {
+        // Fallback for old player format
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, 2 * Math.PI);
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = id === me ? 1 : 0.8;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        
+        if (id === me) {
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = 3;
+          ctx.stroke();
+        }
+      }
+    });
+    
+    ctx.restore();
+  }, [players, food, viruses, me, camera]);
 
   return (
     <div style={{ position: "relative", width: "100vw", height: "100vh" }}>
